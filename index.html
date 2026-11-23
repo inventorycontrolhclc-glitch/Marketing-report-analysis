@@ -893,7 +893,9 @@ function parseStockRows(text) {
   if (lines.length > 100) throw new Error("Send at most 100 rows at a time (you pasted " + lines.length + ").");
   const seen = new Set();
   return lines.map((line, index) => {
-    const parts = line.split(/\t|,|;/).map(part => part.trim());
+    // Accept Excel tabs plus English or Chinese commas/semicolons, and full-width digits or minus.
+    const normalized = line.normalize("NFKC").replace(/[－−]/g, "-");
+    const parts = normalized.split(/\t|,|;|、/).map(part => part.trim());
     const sku = parts[0] || "";
     const raw = parts[1] ?? "";
     if (parts.length !== 2 || !sku || sku.length > 100 || !/^-?\d+$/.test(raw)) {
