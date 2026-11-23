@@ -19,12 +19,30 @@ function json(body, status = 200) {
 }
 
 async function requestJson(url, options = {}) {
-  const response = await fetch(url, {
-    ...options, redirect: "error", signal: AbortSignal.timeout(12000)
-  });
-  let body;
-  try { body = await response.json(); } catch { body = null; }
-  return { status: response.status, ok: response.ok, body };
+  const destination = new URL(url);
+  const service = destination.hostname === "identitytoolkit.googleapis.com" ? "Firebase sign-in" :
+    destination.pathname.endsWith("/get-paginated") ? "Zetpy orders" : "Zetpy authentication";
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 12000);
+  try {
+    const response = await fetch(url, { ...options, redirect: "manual", signal: controller.signal });
+    if (response.status >= 300 && response.status < 400) {
+      throw new RequestError(502, service + " returned an unexpected redirect. Ask the report owner to check the connection.");
+    }
+    let body;
+    try { body = await response.json(); } catch (error) {
+      if (controller.signal.aborted) throw error;
+      body = null;
+    }
+    return { status: response.status, ok: response.ok, body };
+  } catch (error) {
+    if (error instanceof RequestError) throw error;
+    const cause = controller.signal.aborted ? "timed out" : "could not be reached from Cloudflare";
+    console.warn("Zetpy Sales upstream request failed", { service, cause, errorType: error?.name });
+    throw new RequestError(502, service + " " + cause + ". Try again shortly.");
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function postJson(url, body) {
@@ -52,7 +70,14 @@ async function authorize(request, env) {
     throw new RequestError(503, "Firebase could not verify the sign-in. Try again or contact the report owner.");
   }
   const user = result.body?.users?.[0];
-  const claims = JSON.parse(atob(match[1].split(".")[1].replace(/-/g, "+").replace(/_/g, "/")));
+  let claims;
+  try {
+    const segment = match[1].split(".")[1].replace(/-/g, "+").replace(/_/g, "/");
+    const padded = segment.padEnd(Math.ceil(segment.length / 4) * 4, "=");
+    claims = JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(padded), char => char.charCodeAt(0))));
+  } catch {
+    throw new RequestError(401, "Your Google session could not be read. Sign in again.");
+  }
   if (!user || claims.aud !== PROJECT || claims.iss !== "https://securetoken.google.com/" + PROJECT ||
       !user.localId || claims.sub !== user.localId || claims.firebase?.sign_in_provider !== "google.com" ||
       user.emailVerified !== true || !approved.includes(String(user.email || "").toLowerCase())) {
@@ -71,7 +96,6 @@ function validateDates(params) {
 }
 
 let tokenCache;
-let tokenPending;
 async function renew(env, current) {
   let result;
   if (current) result = await postJson(API + "account/refresh", { token: current });
@@ -91,10 +115,8 @@ async function renew(env, current) {
 
 async function zetpyToken(env, rejected) {
   if (tokenCache?.value !== rejected && tokenCache?.expires > Date.now()) return tokenCache.value;
-  if (!tokenPending) {
-    tokenPending = renew(env, tokenCache?.value).finally(() => { tokenPending = undefined; });
-  }
-  return tokenPending;
+  // Keep upstream fetch promises inside their own Cloudflare request context.
+  return renew(env, tokenCache?.value);
 }
 
 // Zetpy groups orders by marketplace, shop and order reference.
@@ -198,8 +220,9 @@ export default {
       await authorize(request, env);
       return json(await loadSales(env, range));
     } catch (error) {
-      return error instanceof RequestError ? json({ message: error.message }, error.status) :
-        json({ message: "Could not complete the sales request. Try again shortly." }, 502);
+      if (error instanceof RequestError) return json({ message: error.message }, error.status);
+      console.error("Zetpy Sales processing failed", { errorType: error?.name });
+      return json({ message: "Cloudflare could not process the sales response. Try again shortly." }, 502);
     }
   }
 };
