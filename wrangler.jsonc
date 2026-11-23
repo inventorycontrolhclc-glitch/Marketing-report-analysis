@@ -1,0 +1,13 @@
+{
+  "name": "hclc-marketing-report-analysis",
+  "compatibility_date": "2026-11-23",
+  "main": "worker.mjs",
+  "assets": {
+    "directory": ".",
+    "binding": "ASSETS",
+    "run_worker_first": ["/api/zetpy/*"]
+  },
+  "vars": {
+    "FIREBASE_WEB_API_KEY": "AIzaSyBn9oAAghWLv2X_OnrL-J2Eh4fm90gdhAA"
+  }
+}
