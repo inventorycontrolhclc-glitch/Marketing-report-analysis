@@ -455,11 +455,6 @@ html,body{margin:0;min-height:100%;background:var(--bg);color:var(--ink);font-fa
 .zetpy-table{width:100%;border-collapse:collapse}
 .zetpy-table th,.zetpy-table td{padding:9px 12px;text-align:left;border-bottom:1px solid var(--line)}
 .zetpy-table :is(th,td):last-child{text-align:right}
-.stock-form{display:grid;gap:10px;margin-top:32px;padding-top:24px;border-top:1px solid var(--line)}
-.stock-form h2{margin:0}
-.stock-warning{margin:0;padding:12px;border-radius:6px;border:1px solid #d97706;background:rgba(217,119,6,.1)}
-.stock-form textarea{width:100%;min-height:120px;padding:10px;font:14px/1.5 ui-monospace,Consolas,monospace;border:1px solid var(--line);border-radius:6px;background:var(--surface);color:var(--ink);resize:vertical}
-.stock-form pre{max-height:240px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;padding:10px;background:var(--surface);border:1px solid var(--line);border-radius:6px}
 .zetpy-paging{display:flex;gap:10px;align-items:center;margin-top:12px;flex-wrap:wrap}
 </style></head>
 <body>
@@ -521,21 +516,6 @@ html,body{margin:0;min-height:100%;background:var(--bg);color:var(--ink);font-fa
         <button id="zetpyNext" class="btn" type="button">Next</button>
       </div>
     </div>
-    <form id="stockForm" class="stock-form" aria-labelledby="stockTitle">
-      <h2 id="stockTitle">Update Zetpy stock</h2>
-      <p class="stock-warning"><strong>This changes live stock in Zetpy</strong>, which syncs to your marketplaces. Zetpy describes the quantity as the “quantity changed”, so test with one SKU first and check the result in the Zetpy app.</p>
-      <label for="stockInput">Paste one row per SKU: <code>SKU, quantity</code> (or copy two columns from Excel). Up to 100 rows.</label>
-      <textarea id="stockInput" rows="6" spellcheck="false" placeholder="111142-01-00, 1&#10;111202-02-01, 1"></textarea>
-      <div class="zetpy-actions">
-        <button id="stockCheck" class="btn btn-line" type="button">Check rows</button>
-        <button id="stockSend" class="btn btn-ink" type="submit" disabled>Send to Zetpy</button>
-      </div>
-      <p id="stockStatus" class="login-message" role="status" aria-live="polite" hidden></p>
-      <div id="stockPreview" class="zetpy-table-wrap" hidden>
-        <table class="zetpy-table"><thead><tr><th scope="col">#</th><th scope="col">SKU</th><th scope="col">Quantity</th></tr></thead><tbody id="stockRows"></tbody></table>
-      </div>
-      <details id="stockReplyBox" hidden><summary>Zetpy reply</summary><pre id="stockReply"></pre></details>
-    </form>
   </div></section>
 </section>
 <noscript>JavaScript must be enabled to sign in and use this report.</noscript>
@@ -634,12 +614,6 @@ function closeZetpySales() {
   salesElement("zetpyAnalysis").hidden = true;
   salesElement("zetpySource").hidden = true;
   salesMessage("");
-  if (typeof resetStockCheck === "function") {
-    resetStockCheck();
-    salesElement("stockInput").value = "";
-    salesElement("stockReplyBox").hidden = true;
-    stockMessage("");
-  }
 }
 
 function salesDate(offset) {
@@ -875,105 +849,6 @@ salesElement("zetpyStatusOptions").addEventListener("change", editStatusSummary)
 salesElement("zetpyPageSize").addEventListener("change", () => { zetpyPage = 1; renderZetpyRows(); });
 salesElement("zetpyPrev").addEventListener("click", () => { zetpyPage = Math.max(1, zetpyPage - 1); renderZetpyRows(); });
 salesElement("zetpyNext").addEventListener("click", () => { zetpyPage++; renderZetpyRows(); });
-
-/* Zetpy stock update: sends { sku, quantity } rows through the Worker. */
-let stockChecked = null;
-let stockSending = false;
-
-function stockMessage(message, error = false) {
-  const status = salesElement("stockStatus");
-  status.textContent = message;
-  status.classList.toggle("error", error);
-  status.hidden = !message;
-}
-
-function parseStockRows(text) {
-  const lines = text.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
-  if (!lines.length) throw new Error("Paste at least one row of SKU and quantity.");
-  if (lines.length > 100) throw new Error("Send at most 100 rows at a time (you pasted " + lines.length + ").");
-  const seen = new Set();
-  return lines.map((line, index) => {
-    // Accept Excel tabs plus English or Chinese commas/semicolons, and full-width digits or minus.
-    const normalized = line.normalize("NFKC").replace(/[－−]/g, "-");
-    const parts = normalized.split(/\t|,|;|、/).map(part => part.trim());
-    const sku = parts[0] || "";
-    const raw = parts[1] ?? "";
-    if (parts.length !== 2 || !sku || sku.length > 100 || !/^-?\d+$/.test(raw)) {
-      throw new Error("Row " + (index + 1) + " (“" + line.slice(0, 60) + "”) needs a SKU and a whole-number quantity.");
-    }
-    const quantity = Number(raw);
-    if (!Number.isSafeInteger(quantity) || Math.abs(quantity) > 100000) throw new Error("Row " + (index + 1) + " has a quantity that is too large.");
-    if (seen.has(sku.toUpperCase())) throw new Error("SKU " + sku + " is listed more than once.");
-    seen.add(sku.toUpperCase());
-    return { sku, quantity };
-  });
-}
-
-function resetStockCheck() {
-  stockChecked = null;
-  salesElement("stockSend").disabled = true;
-  salesElement("stockPreview").hidden = true;
-  salesElement("stockRows").replaceChildren();
-}
-
-function checkStockRows() {
-  resetStockCheck();
-  salesElement("stockReplyBox").hidden = true;
-  try {
-    const rows = parseStockRows(salesElement("stockInput").value);
-    salesElement("stockRows").replaceChildren(...rows.map((row, index) => {
-      const tr = document.createElement("tr");
-      for (const value of [index + 1, row.sku, row.quantity.toLocaleString("en-MY")]) {
-        const td = document.createElement("td");
-        td.textContent = value;
-        tr.appendChild(td);
-      }
-      return tr;
-    }));
-    salesElement("stockPreview").hidden = false;
-    stockChecked = rows;
-    salesElement("stockSend").disabled = false;
-    stockMessage(rows.length + " row" + (rows.length === 1 ? "" : "s") + " ready. Check them, then press Send to Zetpy.");
-  } catch (error) {
-    stockMessage(error.message, true);
-  }
-}
-
-async function sendStockRows(event) {
-  event.preventDefault();
-  if (!zetpyUser || stockSending || !stockChecked) return;
-  const rows = stockChecked;
-  if (!confirm("Send " + rows.length + " stock row" + (rows.length === 1 ? "" : "s") + " to Zetpy?\n\nThis changes live stock on your marketplaces.")) return;
-  stockSending = true;
-  salesElement("stockSend").disabled = true;
-  salesElement("stockCheck").disabled = true;
-  stockMessage("Sending stock to Zetpy…");
-  try {
-    const token = await zetpyUser.getIdToken();
-    const response = await fetch("/api/zetpy/update-stock", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: "Bearer " + token },
-      body: JSON.stringify({ products: rows }), cache: "no-store"
-    });
-    const body = await response.json().catch(() => null);
-    if (!response.ok) throw new Error(body?.message || "Zetpy stock update failed. Try again or contact the report owner.");
-    salesElement("stockReply").textContent = JSON.stringify(body.zetpy ?? {}, null, 2);
-    salesElement("stockReplyBox").hidden = false;
-    stockMessage("Zetpy accepted " + body.sent + " row" + (body.sent === 1 ? "" : "s") +
-      ". Open “Zetpy reply” to see any SKUs Zetpy could not find, and check the stock in the Zetpy app.");
-    resetStockCheck();
-  } catch (error) {
-    stockMessage(error.message || "Zetpy stock update failed.", true);
-    salesElement("stockSend").disabled = !stockChecked;
-  } finally {
-    stockSending = false;
-    salesElement("stockCheck").disabled = false;
-  }
-}
-
-salesElement("stockCheck").addEventListener("click", checkStockRows);
-salesElement("stockInput").addEventListener("input", () => { if (stockChecked) { resetStockCheck(); stockMessage(""); } });
-salesElement("stockForm").addEventListener("submit", sendStockRows);
 
 function loginMessage(text, error = false) {
   const node = document.getElementById("loginMessage"); node.textContent = text; node.classList.toggle("error", error);

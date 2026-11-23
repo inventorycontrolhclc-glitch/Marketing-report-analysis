@@ -38,8 +38,7 @@ function json(body, status = 200) {
 async function requestJson(url, options = {}) {
   const destination = new URL(url);
   const service = destination.hostname === "identitytoolkit.googleapis.com" ? "Firebase sign-in" :
-    destination.pathname.endsWith("/get-paginated") ? "Zetpy orders" :
-    destination.pathname.endsWith("/update-stock") ? "Zetpy stock update" : "Zetpy authentication";
+    destination.pathname.endsWith("/get-paginated") ? "Zetpy orders" : "Zetpy authentication";
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 12000);
   try {
@@ -245,76 +244,9 @@ async function loadSales(env, range, filters) {
   return { ...range, orders, ...(daily ? { dailyRows: rows } : { rows }), ...(grouped ? { orderGroups } : {}) };
 }
 
-const STOCK_MAX_ROWS = 100;
-const STOCK_MAX_QUANTITY = 100000;
-
-async function readStockRows(request) {
-  if (!/^application\/json\b/i.test(request.headers.get("Content-Type") || "")) {
-    throw new RequestError(415, "Send the stock rows as JSON.");
-  }
-  const text = await request.text();
-  if (text.length > 20000) throw new RequestError(413, "Send at most " + STOCK_MAX_ROWS + " stock rows at a time.");
-  let input;
-  try { input = JSON.parse(text); } catch { throw new RequestError(400, "The stock rows could not be read."); }
-  const rows = Array.isArray(input?.products) ? input.products : [];
-  if (!rows.length || rows.length > STOCK_MAX_ROWS) {
-    throw new RequestError(400, "Send 1 to " + STOCK_MAX_ROWS + " stock rows.");
-  }
-  const seen = new Set();
-  return rows.map((row, index) => {
-    const sku = typeof row?.sku === "string" ? row.sku.trim() : "";
-    const quantity = row?.quantity;
-    if (!sku || sku.length > 100 || !Number.isSafeInteger(quantity) || Math.abs(quantity) > STOCK_MAX_QUANTITY) {
-      throw new RequestError(400, "Row " + (index + 1) + " needs a SKU and a whole-number quantity.");
-    }
-    const key = sku.toUpperCase();
-    if (seen.has(key)) throw new RequestError(400, "SKU " + sku + " is listed more than once.");
-    seen.add(key);
-    return { sku, quantity };
-  });
-}
-
-// Zetpy v1 has no stock-reading endpoint; this only sends stock changes by SKU.
-async function updateStock(env, products) {
-  if (!env.ZETPY_EMAIL || !env.ZETPY_PASSWORD) throw new RequestError(503, "The report owner needs to add the Zetpy login secrets in Cloudflare.");
-  let token = await zetpyToken(env);
-  const send = () => requestJson(API + "products/update-stock", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Accept: "application/json", Authorization: "Bearer " + token },
-    body: JSON.stringify({ products })
-  });
-  let result = await send();
-  if (result.status === 401 || result.body?.error?.code === "token_error") {
-    token = await zetpyToken(env, token);
-    result = await send();
-  }
-  if (result.status === 429) throw new RequestError(429, "Zetpy is limiting requests. Try again in a minute.");
-  if (!result.ok || result.body?.success === false) {
-    const reason = typeof result.body?.error?.message === "string" ? " Zetpy said: " + result.body.error.message.slice(0, 200) : "";
-    throw new RequestError(502, "Zetpy did not accept the stock update." + reason);
-  }
-  return { sent: products.length, products, zetpy: result.body ?? {} };
-}
-
-async function handleStock(request, env) {
-  if (request.method !== "POST") return json({ message: "Use POST to update stock." }, 405);
-  try {
-    await authorize(request, env);
-    const products = await readStockRows(request);
-    const result = await updateStock(env, products);
-    console.log("Zetpy stock update sent", { rows: products.length });
-    return json(result);
-  } catch (error) {
-    if (error instanceof RequestError) return json({ message: error.message }, error.status);
-    console.error("Zetpy stock update failed", { errorType: error?.name });
-    return json({ message: "Cloudflare could not send the stock update. Try again shortly." }, 502);
-  }
-}
-
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
-    if (url.pathname === "/api/zetpy/update-stock") return handleStock(request, env);
     if (url.pathname !== "/api/zetpy/sales") return env.ASSETS.fetch(request);
     if (request.method !== "GET") return json({ message: "Use GET to load sales." }, 405);
     try {
