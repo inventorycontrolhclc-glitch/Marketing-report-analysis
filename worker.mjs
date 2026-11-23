@@ -129,7 +129,7 @@ function collectOrders(value, orders, depth = 0) {
   for (const child of Object.values(value)) collectOrders(child, orders, depth + 1);
 }
 
-function collectSales(orders, seen, totals) {
+function collectSales(orders, seen, totals, range, daily) {
   let fresh = 0;
   for (const order of orders) {
     const platform = String(order.app_name || "").trim();
@@ -140,6 +140,11 @@ function collectSales(orders, seen, totals) {
     }
     if (String(order.status).toLowerCase() !== "completed") {
       throw new RequestError(502, "Zetpy returned an order outside the selected status. No totals were loaded.");
+    }
+    const day = daily ? String(order.created_date ?? "").slice(0, 10) : "";
+    if (daily && (!/^\d{4}-\d{2}-\d{2}$/.test(day) || day < range.from || day > range.to ||
+      !Number.isFinite(Date.parse(day)) || new Date(day).toISOString().slice(0, 10) !== day)) {
+      throw new RequestError(502, "Zetpy returned a missing or out-of-range marketplace order date.");
     }
     const key = JSON.stringify([platform, shop, reference]);
     if (seen.has(key)) continue;
@@ -153,8 +158,8 @@ function collectSales(orders, seen, totals) {
       if (!sku || item?.quantity_sold == null || item.quantity_sold === "" || !Number.isSafeInteger(quantity) || quantity < 0) {
         throw new RequestError(502, "A Zetpy order has a missing SKU or invalid quantity. No totals were loaded.");
       }
-      const rowKey = JSON.stringify([platform, sku.toUpperCase()]);
-      const row = totals.get(rowKey) || { platform, sku, name: String(item.name || ""), units: 0 };
+      const rowKey = JSON.stringify([day, platform, sku.toUpperCase()]);
+      const row = totals.get(rowKey) || { ...(daily ? { day } : {}), platform, sku, name: String(item.name || ""), units: 0 };
       row.units += quantity;
       totals.set(rowKey, row);
     }
@@ -162,7 +167,7 @@ function collectSales(orders, seen, totals) {
   return fresh;
 }
 
-async function loadSales(env, range) {
+async function loadSales(env, range, daily) {
   if (!env.ZETPY_EMAIL || !env.ZETPY_PASSWORD) throw new RequestError(503, "The report owner needs to add the Zetpy login secrets in Cloudflare.");
   const seen = new Set(), totals = new Map();
   let token = await zetpyToken(env), reauthorized = false, finished = false;
@@ -189,6 +194,8 @@ async function loadSales(env, range) {
     const orders = [];
     collectOrders(body.data ?? body.orders ?? body, orders);
     const pagination = body.pagination ?? body.meta ?? body.data?.pagination ?? {};
+    const last = Number(pagination.last_page ?? pagination.total_pages ?? body.last_page ?? body.total_pages);
+    if (Number.isInteger(last) && last > MAX_PAGES) break;
     if (!orders.length) {
       const container = body.orders ?? body.data;
       if (container && typeof container === "object" && !Object.keys(container).length) {
@@ -197,8 +204,7 @@ async function loadSales(env, range) {
       }
       throw new RequestError(502, "Zetpy returned a response without readable order items.");
     }
-    if (!collectSales(orders, seen, totals)) throw new RequestError(502, "Zetpy repeated an order page. Try a shorter date range.");
-    const last = Number(pagination.last_page ?? pagination.total_pages ?? body.last_page ?? body.total_pages);
+    if (!collectSales(orders, seen, totals, range, daily)) throw new RequestError(502, "Zetpy repeated an order page. Try a shorter date range.");
     if ((Number.isInteger(last) && last > 0 && page >= last) ||
         (Object.hasOwn(pagination, "next_page_url") && pagination.next_page_url === null)) {
       finished = true;
@@ -207,7 +213,7 @@ async function loadSales(env, range) {
   }
   if (!finished) throw new RequestError(422, "This period exceeds the order page limit. Choose fewer days.");
   const rows = [...totals.values()].sort((a, b) => b.units - a.units || a.platform.localeCompare(b.platform) || a.sku.localeCompare(b.sku));
-  return { ...range, orders: seen.size, rows };
+  return { ...range, orders: seen.size, ...(daily ? { dailyRows: rows } : { rows }) };
 }
 
 export default {
@@ -218,7 +224,7 @@ export default {
     try {
       const range = validateDates(url.searchParams);
       await authorize(request, env);
-      return json(await loadSales(env, range));
+      return json(await loadSales(env, range, url.searchParams.get("daily") === "1"));
     } catch (error) {
       if (error instanceof RequestError) return json({ message: error.message }, error.status);
       console.error("Zetpy Sales processing failed", { errorType: error?.name });
