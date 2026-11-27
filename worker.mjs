@@ -165,7 +165,7 @@ function collectSales(orders, seen, totals, groups, range, filters) {
     if (seen.has(key)) continue;
     seen.add(key);
     fresh++;
-    if (!statuses.has(status)) continue;
+    if (statuses && !statuses.has(status)) continue;
     const day = daily ? String(order.created_date ?? "").slice(0, 10) : "";
     if (daily && (!/^\d{4}-\d{2}-\d{2}$/.test(day) || day < range.from || day > range.to ||
       !Number.isFinite(Date.parse(day)) || new Date(day).toISOString().slice(0, 10) !== day)) {
@@ -245,11 +245,59 @@ async function loadSales(env, range, filters) {
 }
 
 export default {
+  async scheduled(controller, env) {
+    const day = 24 * 60 * 60 * 1000;
+    const malaysiaTime = controller.scheduledTime + 8 * 60 * 60 * 1000;
+    const dateOnly = time => new Date(time).toISOString().slice(0, 10);
+
+    const dateFrom = dateOnly(malaysiaTime - 7 * day);
+    const dateTo = dateOnly(malaysiaTime - day);
+
+    const filters = {
+      daily: true,
+      grouped: true,
+      statuses: null,
+      upstreamStatus: ""
+    };
+
+    const report = await loadSales(env, { from: dateFrom, to: dateTo }, filters);
+    const units = report.dailyRows.reduce((total, row) => total + row.units, 0);
+    const saved = await env.ZETPY_REPORT_DB.prepare(`
+      INSERT INTO zetpy_weekly_report (
+        id, date_from, date_to, scheduled_at, refreshed_at, order_count, unit_count, report_json
+      ) VALUES (1, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT (id) DO UPDATE SET
+        date_from = excluded.date_from,
+        date_to = excluded.date_to,
+        scheduled_at = excluded.scheduled_at,
+        refreshed_at = excluded.refreshed_at,
+        order_count = excluded.order_count,
+        unit_count = excluded.unit_count,
+        report_json = excluded.report_json
+      WHERE excluded.scheduled_at >= zetpy_weekly_report.scheduled_at
+    `).bind(
+      dateFrom, dateTo, controller.scheduledTime, new Date().toISOString(),
+      report.orders, units, JSON.stringify(report)
+    ).run();
+    if (saved.meta.changes) {
+      console.log(`Zetpy weekly report saved: ${dateFrom} to ${dateTo}, ${report.orders} orders, ${units} units ordered`);
+    }
+  },
   async fetch(request, env) {
     const url = new URL(request.url);
-    if (url.pathname !== "/api/zetpy/sales") return env.ASSETS.fetch(request);
+    const weekly = url.pathname === "/api/zetpy/weekly";
+    if (!weekly && url.pathname !== "/api/zetpy/sales") return env.ASSETS.fetch(request);
     if (request.method !== "GET") return json({ message: "Use GET to load sales." }, 405);
     try {
+      if (weekly) {
+        await authorize(request, env);
+        if (!env.ZETPY_REPORT_DB) return json({ message: "The automatic report is unavailable. Use Filter to load orders." }, 503);
+        const saved = await env.ZETPY_REPORT_DB.prepare(
+          "SELECT refreshed_at, report_json FROM zetpy_weekly_report WHERE id = 1"
+        ).first();
+        if (!saved) return json({ message: "The first automatic report is pending. Use Filter to load orders." }, 404);
+        return json({ ...JSON.parse(saved.report_json), refreshedAt: saved.refreshed_at });
+      }
       const range = validateDates(url.searchParams);
       const filters = validateSalesFilters(url.searchParams);
       await authorize(request, env);

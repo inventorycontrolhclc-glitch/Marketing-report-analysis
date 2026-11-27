@@ -476,7 +476,7 @@ html,body{margin:0;min-height:100%;background:var(--bg);color:var(--ink);font-fa
   <div id="reportMount"></div>
   <section id="zetpyPanel" class="zetpy-panel" aria-labelledby="zetpyTitle" hidden><div class="zetpy-content">
     <h1 id="zetpyTitle">Zetpy Sales</h1>
-    <p>Filter orders by marketplace, account, status and marketplace order date. Marketplace and account choices populate from the orders you load.</p>
+    <p>Latest 7 days shows the automatic report for all shops and order statuses. Use Filter for a custom report.</p>
     <form id="zetpyForm" class="zetpy-form">
       <fieldset id="zetpyFields" class="zetpy-fields" aria-label="Zetpy sales filters">
         <label>Marketplace <select id="zetpyPlatform"><option value="">All marketplaces</option></select></label>
@@ -500,6 +500,7 @@ html,body{margin:0;min-height:100%;background:var(--bg);color:var(--ink);font-fa
         <label>Rows <select id="zetpyPageSize"><option value="50" selected>50</option><option value="100">100</option><option value="250">250</option></select></label>
       </fieldset>
       <div class="zetpy-actions">
+        <button id="zetpyWeekly" class="btn btn-line" type="button">Latest 7 days</button>
         <button id="zetpyLoad" class="btn btn-ink" type="submit">Filter</button>
         <button id="zetpyCancel" class="btn btn-line" type="button" hidden>Cancel load</button>
       </div>
@@ -537,6 +538,8 @@ let zetpyUser;
 let zetpyRequest;
 let zetpySnapshot;
 let zetpyLoaded;
+let zetpyOpened = false;
+let zetpyWeekly = false;
 let zetpyShops = new Map();
 let zetpyRows = [];
 let zetpyPage = 1;
@@ -579,6 +582,7 @@ function refreshMarketplaces() {
 function setZetpyBusy(busy) {
   salesElement("zetpyFields").disabled = busy;
   salesElement("zetpyLoad").disabled = busy;
+  salesElement("zetpyWeekly").disabled = busy;
   salesElement("zetpyCancel").hidden = !busy;
 }
 
@@ -595,6 +599,8 @@ function closeZetpySales() {
   zetpyUser = undefined;
   zetpySnapshot = undefined;
   zetpyLoaded = undefined;
+  zetpyOpened = false;
+  zetpyWeekly = false;
   zetpyShops = new Map();
   zetpyRows = [];
   zetpyPage = 1;
@@ -635,6 +641,10 @@ function toggleZetpySales() {
     if (!salesElement("zetpyFrom").value) salesElement("zetpyFrom").value = salesDate(-7);
     if (!salesElement("zetpyTo").value) salesElement("zetpyTo").value = salesDate(-1);
     salesElement("zetpyFrom").focus();
+    if (!zetpyOpened || zetpyWeekly) {
+      zetpyOpened = true;
+      return loadZetpyWeeklyReport();
+    }
   }
 }
 
@@ -762,12 +772,12 @@ function summarizeZetpyPeriod(dailyRows) {
     a.platform.localeCompare(b.platform) || a.sku.localeCompare(b.sku));
 }
 
-function applyZetpyFilters(raw, market, account, selected) {
+function applyZetpyFilters(raw, market, account, selected, refreshedAt) {
   const matchesShop = entry => (!market || entry.platform === market) && (!account || shopKey(entry) === account);
   const dailyRows = raw.dailyRows.filter(matchesShop);
   const orders = raw.orderGroups.filter(matchesShop).reduce((total, group) => total + group.orders, 0);
-  const labels = selected.map(input => input.dataset.label);
-  const includesPending = selected.some(input => input.value !== "completed");
+  const labels = refreshedAt ? ["All order statuses"] : selected.map(input => input.dataset.label);
+  const includesPending = Boolean(refreshedAt) || selected.some(input => input.value !== "completed");
   const scope = [market || "All marketplaces", zetpyShops.get(account)?.accountName || "All accounts", labels.join(", ")].join(" · ");
   const snapshot = { from: raw.from, to: raw.to, orders, dailyRows, scope, includesPending };
   const frame = zetpyFrame();
@@ -781,7 +791,52 @@ function applyZetpyFilters(raw, market, account, selected) {
   renderZetpyRows();
   salesElement("zetpyResults").hidden = !zetpyRows.length;
   const description = scope + " · " + raw.from + " to " + raw.to;
-  salesMessage(orders ? orders.toLocaleString("en-MY") + " orders · " + description : "No orders found · " + description);
+  const updated = refreshedAt ? " · Last updated " + new Date(refreshedAt).toLocaleString("en-MY", {
+    timeZone: "Asia/Kuala_Lumpur", dateStyle: "medium", timeStyle: "short"
+  }) + " MYT" : "";
+  salesMessage((orders ? orders.toLocaleString("en-MY") + " orders · " : "No orders found · ") + description + updated);
+}
+
+async function loadZetpyWeeklyReport() {
+  if (!zetpyUser || zetpyRequest) return;
+  const request = new AbortController(), user = zetpyUser;
+  zetpyRequest = request;
+  setZetpyBusy(true);
+  salesMessage("Loading the latest seven-day report…");
+  try {
+    const token = await user.getIdToken();
+    if (request.signal.aborted) return;
+    const response = await fetch("/api/zetpy/weekly", {
+      headers: { Authorization: "Bearer " + token }, signal: request.signal, cache: "no-store"
+    });
+    const body = await response.json().catch(() => null);
+    if (request.signal.aborted || zetpyRequest !== request || zetpyUser !== user) return;
+    if (!response.ok) throw new Error(body?.message || "The automatic report is unavailable. Use Filter to load orders.");
+    if (typeof body?.from !== "string" || typeof body.to !== "string" ||
+        !Number.isFinite(Date.parse(body.from)) || !Number.isFinite(Date.parse(body.to)) ||
+        zetpyIso(Date.parse(body.from)) !== body.from || zetpyIso(Date.parse(body.to)) !== body.to ||
+        Date.parse(body.to) - Date.parse(body.from) !== 6 * SALES_DAY_MS ||
+        !Number.isFinite(Date.parse(body.refreshedAt)) || !Number.isSafeInteger(body.orders) || body.orders < 0 ||
+        !Array.isArray(body.orderGroups) || !Array.isArray(body.dailyRows)) {
+      throw new Error("The saved seven-day report is incomplete. Use Filter to load orders.");
+    }
+    for (const group of body.orderGroups) zetpyShops.set(shopKey(group), group);
+    refreshMarketplaces();
+    applyZetpyFilters(body, "", "", [], body.refreshedAt);
+    salesElement("zetpyPlatform").value = "";
+    refreshAccounts();
+    salesElement("zetpyAccount").value = "";
+    salesElement("zetpyFrom").value = body.from;
+    salesElement("zetpyTo").value = body.to;
+    zetpyWeekly = true;
+  } catch (error) {
+    if (!request.signal.aborted) salesMessage(error.message || "The automatic report is unavailable.", true);
+  } finally {
+    if (zetpyRequest === request) {
+      zetpyRequest = undefined;
+      setZetpyBusy(false);
+    }
+  }
 }
 
 async function loadZetpySales(event) {
@@ -800,6 +855,7 @@ async function loadZetpySales(event) {
     return;
   }
   if (!selected.length) { salesMessage("Select at least one order status.", true); return; }
+  zetpyWeekly = false;
   salesElement("zetpyStatusMenu").open = false;
   const statuses = selected.map(input => input.value);
   const period = JSON.stringify([from, to, statuses]);
@@ -828,6 +884,7 @@ async function loadZetpySales(event) {
 }
 
 salesElement("zetpyToggle").addEventListener("click", toggleZetpySales);
+salesElement("zetpyWeekly").addEventListener("click", loadZetpyWeeklyReport);
 salesElement("zetpyCancel").addEventListener("click", () => {
   zetpyRequest?.abort();
   zetpyRequest = undefined;

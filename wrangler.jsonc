@@ -3,6 +3,17 @@
   "compatibility_date": "2026-11-23",
   "main": "worker.mjs",
   "keep_vars": true,
+  "triggers": {
+    "crons": ["0 */4 * * *"]
+  },
+  "d1_databases": [
+    {
+      "binding": "ZETPY_REPORT_DB",
+      "database_name": "hclc-zetpy-weekly",
+      "database_id": "cf664ebc-b2db-4997-a422-54090bbfa70e",
+      "migrations_dir": "."
+    }
+  ],
   "assets": {
     "directory": ".",
     "binding": "ASSETS",
